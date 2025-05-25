@@ -969,6 +969,46 @@ func Decorated(enabled bool) Option {
 	}
 }
 
+// LayerShell configures the window to use Wayland layer shell.
+func LayerShell(layer Layer, namespace string) Option {
+	return func(_ unit.Metric, cnf *Config) {
+		cnf.LayerShell.Enabled = true
+		cnf.LayerShell.Layer = layer
+		cnf.LayerShell.Namespace = namespace
+	}
+}
+
+// LayerShellAnchor sets the anchor edges for a  layer shell surface.
+func LayerShellAnchor(anchor Anchor) Option {
+	return func(_ unit.Metric, cnf *Config) {
+		cnf.LayerShell.Anchor = anchor
+	}
+}
+
+// LayerShellExclusiveZone sets the exclusive zone for a layer shell surface.
+func LayerShellExclusiveZone(zone unit.Dp) Option {
+	return func(m unit.Metric, cnf *Config) {
+		cnf.LayerShell.ExclusiveZone = int32(m.Dp(zone))
+	}
+}
+
+// LayerShellKeyboardInteractivity sets keyboard interactivity for a layer shell surface.
+func LayerShellKeyboardInteractivity(interactivity KeyboardInteractivity) Option {
+	return func(_ unit.Metric, cnf *Config) {
+		cnf.LayerShell.KeyboardInteractivity = interactivity
+	}
+}
+
+// LayerShellMargin sets the margin for a layer shell surface.
+func LayerShellMargin(top, bottom, left, right unit.Dp) Option {
+	return func(m unit.Metric, cnf *Config) {
+		cnf.LayerShell.Margin.Top = int32(m.Dp(top))
+		cnf.LayerShell.Margin.Bottom = int32(m.Dp(bottom))
+		cnf.LayerShell.Margin.Left = int32(m.Dp(left))
+		cnf.LayerShell.Margin.Right = int32(m.Dp(right))
+	}
+}
+
 // flushEvent is sent to detect when the user program
 // has completed processing of all prior events. Its an
 // [io/event.Event] but only for internal use.

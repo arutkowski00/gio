@@ -8,6 +8,7 @@
 #include "wayland_xdg_shell.h"
 #include "wayland_xdg_decoration.h"
 #include "wayland_text_input.h"
+#include "wayland_wlr_layer_shell.h"
 #include "_cgo_export.h"
 
 const struct wl_registry_listener gio_registry_listener = {
@@ -121,4 +122,9 @@ const struct wl_data_source_listener gio_data_source_listener = {
 	.dnd_drop_performed = gio_onDataSourceDNDDropPerformed,
 	.dnd_finished = gio_onDataSourceDNDFinished,
 	.action = gio_onDataSourceAction,
+};
+
+const struct zwlr_layer_surface_v1_listener gio_zwlr_layer_surface_v1_listener = {
+	.configure = gio_onLayerSurfaceConfigure,
+	.closed = gio_onLayerSurfaceClosed,
 };

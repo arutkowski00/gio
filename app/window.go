@@ -207,13 +207,7 @@ func (w *Window) validateAndProcess(size image.Point, sync bool, frame *op.Ops, 
 }
 
 func (w *Window) frame(frame *op.Ops, viewport image.Point) error {
-	if runtime.GOOS == "js" {
-		// Use transparent black when Gio is embedded, to allow mixing of Gio and
-		// foreign content below.
-		w.gpu.Clear(color.NRGBA{A: 0x00, R: 0x00, G: 0x00, B: 0x00})
-	} else {
-		w.gpu.Clear(color.NRGBA{A: 0xff, R: 0xff, G: 0xff, B: 0xff})
-	}
+	w.gpu.Clear(w.decorations.Theme.Bg)
 	target, err := w.ctx.RenderTarget()
 	if err != nil {
 		return err
@@ -734,11 +728,31 @@ func (w *Window) Event() event.Event {
 
 func (w *Window) init() {
 	debug.Parse()
+	defaultTheme := material.NewTheme()
+	if runtime.GOOS == "js" {
+		// Use transparent black when Gio is embedded, to allow mixing of Gio and
+		// foreign content below.
+		defaultTheme.Bg = color.NRGBA{A: 0x00, R: 0x00, G: 0x00, B: 0x00}
+	}
+
+	defaultOptions := []Option{
+		Size(800, 600),
+		Title("Gio"),
+		Decorated(true),
+		Theme(defaultTheme),
+	}
+	options := append(defaultOptions, w.initialOpts...)
+	w.initialOpts = nil
+	var cnf Config
+	cnf.apply(unit.Metric{}, options)
+
+	// Copy the theme value to change the shaper.
+	theme := *cnf.Theme
+	theme.Shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(gofont.Regular()))
+
 	// Measure decoration height.
 	deco := new(widget.Decorations)
-	theme := material.NewTheme()
-	theme.Shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(gofont.Regular()))
-	decoStyle := material.Decorations(theme, deco, 0, "")
+	decoStyle := material.Decorations(&theme, deco, 0, "")
 	gtx := layout.Context{
 		Ops: new(op.Ops),
 		// Measure in Dp.
@@ -748,19 +762,12 @@ func (w *Window) init() {
 	gtx.Constraints.Max.Y = 200
 	dims := decoStyle.Layout(gtx)
 	decoHeight := unit.Dp(dims.Size.Y)
-	defaultOptions := []Option{
-		Size(800, 600),
-		Title("Gio"),
-		Decorated(true),
-		decoHeightOpt(decoHeight),
-	}
-	options := append(defaultOptions, w.initialOpts...)
-	w.initialOpts = nil
-	var cnf Config
-	cnf.apply(unit.Metric{}, options)
+	decoHeightOption := decoHeightOpt(decoHeight)
+	options = append(options, decoHeightOption)
+	decoHeightOption(unit.Metric{}, &cnf)
 
 	w.nocontext = cnf.CustomRenderer
-	w.decorations.Theme = theme
+	w.decorations.Theme = &theme
 	w.decorations.Decorations = deco
 	w.decorations.enabled = cnf.Decorated
 	w.decorations.height = decoHeight
@@ -945,6 +952,13 @@ func StatusColor(color color.NRGBA) Option {
 func NavigationColor(color color.NRGBA) Option {
 	return func(_ unit.Metric, cnf *Config) {
 		cnf.NavigationColor = color
+	}
+}
+
+// Theme sets the theme of the window.
+func Theme(theme *material.Theme) Option {
+	return func(_ unit.Metric, cnf *Config) {
+		cnf.Theme = theme
 	}
 }
 

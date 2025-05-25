@@ -12,6 +12,7 @@ import (
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/op"
+	"gioui.org/widget/material"
 
 	"gioui.org/gpu"
 	"gioui.org/io/pointer"
@@ -135,6 +136,8 @@ type Config struct {
 	Decorated bool
 	// Focused reports whether has the keyboard focus.
 	Focused bool
+	// Theme is the theme of the window and its decoration bar.
+	Theme *material.Theme
 	// decoHeight is the height of the fallback decoration for platforms such
 	// as Wayland that may need fallback client-side decorations.
 	decoHeight unit.Dp

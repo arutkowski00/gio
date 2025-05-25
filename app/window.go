@@ -894,10 +894,10 @@ func Title(t string) Option {
 
 // Size sets the size of the window. The mode will be changed to Windowed.
 func Size(w, h unit.Dp) Option {
-	if w <= 0 {
+	if w < 0 {
 		panic("width must be larger than or equal to 0")
 	}
-	if h <= 0 {
+	if h < 0 {
 		panic("height must be larger than or equal to 0")
 	}
 	return func(m unit.Metric, cnf *Config) {
@@ -911,10 +911,10 @@ func Size(w, h unit.Dp) Option {
 
 // MaxSize sets the maximum size of the window.
 func MaxSize(w, h unit.Dp) Option {
-	if w <= 0 {
+	if w < 0 {
 		panic("width must be larger than or equal to 0")
 	}
-	if h <= 0 {
+	if h < 0 {
 		panic("height must be larger than or equal to 0")
 	}
 	return func(m unit.Metric, cnf *Config) {
@@ -927,10 +927,10 @@ func MaxSize(w, h unit.Dp) Option {
 
 // MinSize sets the minimum size of the window.
 func MinSize(w, h unit.Dp) Option {
-	if w <= 0 {
+	if w < 0 {
 		panic("width must be larger than or equal to 0")
 	}
-	if h <= 0 {
+	if h < 0 {
 		panic("height must be larger than or equal to 0")
 	}
 	return func(m unit.Metric, cnf *Config) {

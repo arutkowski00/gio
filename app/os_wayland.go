@@ -405,7 +405,7 @@ func (d *wlDisplay) createNativeWindow(options []Option) (*window, error) {
 		if config.LayerShell.KeyboardInteractivity != 0 {
 			C.zwlr_layer_surface_v1_set_keyboard_interactivity(w.layerSurf, C.uint32_t(config.LayerShell.KeyboardInteractivity))
 		}
-		if config.Size.X > 0 && config.Size.Y > 0 {
+		if config.Size.X > 0 || config.Size.Y > 0 {
 			C.zwlr_layer_surface_v1_set_size(w.layerSurf, C.uint32_t(config.Size.X), C.uint32_t(config.Size.Y))
 		}
 		if config.LayerShell.Margin.Top != 0 || config.LayerShell.Margin.Bottom != 0 || config.LayerShell.Margin.Left != 0 || config.LayerShell.Margin.Right != 0 {
@@ -1126,6 +1126,7 @@ func (w *window) Configure(options []Option) {
 		if prev.Size != cnf.Size {
 			w.config.Size = cnf.Size
 			w.size = w.config.Size.Div(w.scale)
+			C.zwlr_layer_surface_v1_set_size(w.layerSurf, C.uint32_t(w.config.Size.X), C.uint32_t(w.config.Size.Y))
 		}
 		w.ProcessEvent(ConfigEvent{Config: w.config})
 		return
@@ -2062,7 +2063,7 @@ func fromFixed(v C.wl_fixed_t) float32 {
 func gio_onLayerSurfaceConfigure(data unsafe.Pointer, layerSurf *C.struct_zwlr_layer_surface_v1, serial C.uint32_t, width, height C.uint32_t) {
 	w := callbackLoad(data).(*window)
 	w.serial = serial
-	if width > 0 && height > 0 {
+	if width > 0 || height > 0 {
 		sz := image.Point{
 			X: int(width),
 			Y: int(height),

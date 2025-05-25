@@ -45,9 +45,13 @@ import (
 //go:generate wayland-scanner client-header /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml wayland_xdg_decoration.h
 //go:generate wayland-scanner private-code /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml wayland_xdg_decoration.c
 
+//go:generate wayland-scanner client-header /usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml wayland_wlr_layer_shell.h
+//go:generate wayland-scanner private-code /usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml wayland_wlr_layer_shell.c
+
 //go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_xdg_shell.c
 //go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_xdg_decoration.c
 //go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_text_input.c
+//go:generate sed -i "1s;^;//go:build ((linux \\&\\& !android) || freebsd) \\&\\& !nowayland\\n// +build linux,!android freebsd\\n// +build !nowayland\\n\\n;" wayland_wlr_layer_shell.c
 
 /*
 #cgo linux pkg-config: wayland-client wayland-cursor
@@ -61,6 +65,7 @@ import (
 #include "wayland_text_input.h"
 #include "wayland_xdg_shell.h"
 #include "wayland_xdg_decoration.h"
+#include "wayland_wlr_layer_shell.h"
 
 extern const struct wl_registry_listener gio_registry_listener;
 extern const struct wl_surface_listener gio_surface_listener;
@@ -78,6 +83,8 @@ extern const struct zwp_text_input_v3_listener gio_zwp_text_input_v3_listener;
 extern const struct wl_data_device_listener gio_data_device_listener;
 extern const struct wl_data_offer_listener gio_data_offer_listener;
 extern const struct wl_data_source_listener gio_data_source_listener;
+extern const struct zwlr_layer_shell_v1_listener gio_zwlr_layer_shell_v1_listener;
+extern const struct zwlr_layer_surface_v1_listener gio_zwlr_layer_surface_v1_listener;
 */
 import "C"
 
@@ -90,6 +97,7 @@ type wlDisplay struct {
 	shm               *C.struct_wl_shm
 	dataDeviceManager *C.struct_wl_data_device_manager
 	decor             *C.struct_zxdg_decoration_manager_v1
+	layerShell        *C.struct_zwlr_layer_shell_v1
 	seat              *wlSeat
 	xkb               *xkb.Context
 	outputMap         map[C.uint32_t]*C.struct_wl_output
@@ -160,6 +168,9 @@ type window struct {
 	wmSurf     *C.struct_xdg_surface
 	topLvl     *C.struct_xdg_toplevel
 	decor      *C.struct_zxdg_toplevel_decoration_v1
+	layerSurf  *C.struct_zwlr_layer_surface_v1
+	layer      uint32 // ZWLR_LAYER_SHELL_V1_LAYER_*
+	namespace  string // Layer surface namespace
 	ppdp, ppsp float32
 	scroll     struct {
 		time  time.Duration
@@ -329,15 +340,17 @@ func (d *wlDisplay) createNativeWindow(options []Option) (*window, error) {
 	if d.compositor == nil {
 		return nil, errors.New("wayland: no compositor available")
 	}
-	if d.wm == nil {
-		return nil, errors.New("wayland: no xdg_wm_base available")
-	}
 	if d.shm == nil {
 		return nil, errors.New("wayland: no wl_shm available")
 	}
 	if len(d.outputMap) == 0 {
 		return nil, errors.New("wayland: no outputs available")
 	}
+
+	// Parse configuration to determine if we should use layer shell
+	var config Config
+	config.apply(unit.Metric{}, options)
+
 	var scale int
 	for _, conf := range d.outputConfig {
 		if s := conf.scale; s > scale {
@@ -361,21 +374,76 @@ func (d *wlDisplay) createNativeWindow(options []Option) (*window, error) {
 	}
 	C.wl_surface_set_buffer_scale(w.surf, C.int32_t(w.scale))
 	callbackStore(unsafe.Pointer(w.surf), w)
-	w.wmSurf = C.xdg_wm_base_get_xdg_surface(d.wm, w.surf)
-	if w.wmSurf == nil {
-		w.destroy()
-		return nil, errors.New("wayland: xdg_wm_base_get_xdg_surface failed")
-	}
-	w.topLvl = C.xdg_surface_get_toplevel(w.wmSurf)
-	if w.topLvl == nil {
-		w.destroy()
-		return nil, errors.New("wayland: xdg_surface_get_toplevel failed")
+
+	if config.LayerShell.Enabled {
+		// Create layer shell surface
+		if d.layerShell == nil {
+			w.destroy()
+			return nil, errors.New("wayland: layer shell not available")
+		}
+
+		// Get the first available output, or nil for compositor choice
+		var output *C.struct_wl_output
+		for _, out := range d.outputMap {
+			output = out
+			break
+		}
+
+		err := d.createLayerSurface(w, output, config.LayerShell.Layer, config.LayerShell.Namespace)
+		if err != nil {
+			w.destroy()
+			return nil, err
+		}
+
+		// Configure layer surface properties
+		if config.LayerShell.Anchor != 0 {
+			C.zwlr_layer_surface_v1_set_anchor(w.layerSurf, C.uint32_t(config.LayerShell.Anchor))
+		}
+		if config.LayerShell.ExclusiveZone != 0 {
+			C.zwlr_layer_surface_v1_set_exclusive_zone(w.layerSurf, C.int32_t(config.LayerShell.ExclusiveZone))
+		}
+		if config.LayerShell.KeyboardInteractivity != 0 {
+			C.zwlr_layer_surface_v1_set_keyboard_interactivity(w.layerSurf, C.uint32_t(config.LayerShell.KeyboardInteractivity))
+		}
+		if config.Size.X > 0 && config.Size.Y > 0 {
+			C.zwlr_layer_surface_v1_set_size(w.layerSurf, C.uint32_t(config.Size.X), C.uint32_t(config.Size.Y))
+		}
+		if config.LayerShell.Margin.Top != 0 || config.LayerShell.Margin.Bottom != 0 || config.LayerShell.Margin.Left != 0 || config.LayerShell.Margin.Right != 0 {
+			C.zwlr_layer_surface_v1_set_margin(w.layerSurf, C.int32_t(config.LayerShell.Margin.Top), C.int32_t(config.LayerShell.Margin.Right), C.int32_t(config.LayerShell.Margin.Bottom), C.int32_t(config.LayerShell.Margin.Left))
+		}
+	} else {
+		// Create regular XDG window
+		if d.wm == nil {
+			w.destroy()
+			return nil, errors.New("wayland: no xdg_wm_base available")
+		}
+
+		w.wmSurf = C.xdg_wm_base_get_xdg_surface(d.wm, w.surf)
+		if w.wmSurf == nil {
+			w.destroy()
+			return nil, errors.New("wayland: xdg_wm_base_get_xdg_surface failed")
+		}
+		w.topLvl = C.xdg_surface_get_toplevel(w.wmSurf)
+		if w.topLvl == nil {
+			w.destroy()
+			return nil, errors.New("wayland: xdg_surface_get_toplevel failed")
+		}
+
+		id := C.CString(ID)
+		defer C.free(unsafe.Pointer(id))
+		C.xdg_toplevel_set_app_id(w.topLvl, id)
+
+		C.xdg_wm_base_add_listener(d.wm, &C.gio_xdg_wm_base_listener, unsafe.Pointer(w.surf))
+		C.xdg_surface_add_listener(w.wmSurf, &C.gio_xdg_surface_listener, unsafe.Pointer(w.surf))
+		C.xdg_toplevel_add_listener(w.topLvl, &C.gio_xdg_toplevel_listener, unsafe.Pointer(w.surf))
+
+		if d.decor != nil {
+			w.decor = C.zxdg_decoration_manager_v1_get_toplevel_decoration(d.decor, w.topLvl)
+			C.zxdg_toplevel_decoration_v1_add_listener(w.decor, &C.gio_zxdg_toplevel_decoration_v1_listener, unsafe.Pointer(w.surf))
+		}
 	}
 
-	id := C.CString(ID)
-	defer C.free(unsafe.Pointer(id))
-	C.xdg_toplevel_set_app_id(w.topLvl, id)
-
+	// Common cursor setup
 	cursorTheme := C.CString(os.Getenv("XCURSOR_THEME"))
 	defer C.free(unsafe.Pointer(cursorTheme))
 	cursorSize := 32
@@ -403,15 +471,9 @@ func (d *wlDisplay) createNativeWindow(options []Option) (*window, error) {
 		return nil, errors.New("wayland: wl_compositor_create_surface failed")
 	}
 	C.wl_surface_set_buffer_scale(w.cursor.surf, C.int32_t(w.scale))
-	C.xdg_wm_base_add_listener(d.wm, &C.gio_xdg_wm_base_listener, unsafe.Pointer(w.surf))
-	C.wl_surface_add_listener(w.surf, &C.gio_surface_listener, unsafe.Pointer(w.surf))
-	C.xdg_surface_add_listener(w.wmSurf, &C.gio_xdg_surface_listener, unsafe.Pointer(w.surf))
-	C.xdg_toplevel_add_listener(w.topLvl, &C.gio_xdg_toplevel_listener, unsafe.Pointer(w.surf))
 
-	if d.decor != nil {
-		w.decor = C.zxdg_decoration_manager_v1_get_toplevel_decoration(d.decor, w.topLvl)
-		C.zxdg_toplevel_decoration_v1_add_listener(w.decor, &C.gio_zxdg_toplevel_decoration_v1_listener, unsafe.Pointer(w.surf))
-	}
+	// Common surface setup
+	C.wl_surface_add_listener(w.surf, &C.gio_surface_listener, unsafe.Pointer(w.surf))
 	w.updateOpaqueRegion()
 	return w, nil
 }
@@ -702,6 +764,8 @@ func gio_onRegistryGlobal(data unsafe.Pointer, reg *C.struct_wl_registry, name C
 	case "wl_data_device_manager":
 		d.dataDeviceManager = (*C.struct_wl_data_device_manager)(C.wl_registry_bind(reg, name, &C.wl_data_device_manager_interface, 3))
 		d.bindDataDevice()
+	case "zwlr_layer_shell_v1":
+		d.layerShell = (*C.struct_zwlr_layer_shell_v1)(C.wl_registry_bind(reg, name, &C.zwlr_layer_shell_v1_interface, 1))
 	}
 }
 
@@ -1056,58 +1120,71 @@ func (w *window) Configure(options []Option) {
 	cnf.apply(cfg, options)
 	w.config.decoHeight = cnf.decoHeight
 
-	switch cnf.Mode {
-	case Fullscreen:
-		switch prev.Mode {
-		case Minimized, Fullscreen:
-		default:
-			w.config.Mode = Fullscreen
-			w.wsize = w.config.Size
-			C.xdg_toplevel_set_fullscreen(w.topLvl, nil)
-		}
-	case Minimized:
-		switch prev.Mode {
-		case Minimized, Fullscreen:
-		default:
-			w.config.Mode = Minimized
-			C.xdg_toplevel_set_minimized(w.topLvl)
-		}
-	case Maximized:
-		switch prev.Mode {
-		case Minimized, Fullscreen:
-		default:
-			w.config.Mode = Maximized
-			w.wsize = w.config.Size
-			C.xdg_toplevel_set_maximized(w.topLvl)
-			w.setTitle(prev, cnf)
-		}
-	case Windowed:
-		switch prev.Mode {
+	// Layer shell surfaces don't support window modes (fullscreen, minimized, etc.)
+	// Only apply mode changes to XDG toplevel windows
+	if w.topLvl != nil {
+		switch cnf.Mode {
 		case Fullscreen:
-			w.config.Mode = Windowed
-			w.size = w.wsize.Div(w.scale)
-			C.xdg_toplevel_unset_fullscreen(w.topLvl)
+			switch prev.Mode {
+			case Minimized, Fullscreen:
+			default:
+				w.config.Mode = Fullscreen
+				w.wsize = w.config.Size
+				C.xdg_toplevel_set_fullscreen(w.topLvl, nil)
+			}
 		case Minimized:
-			w.config.Mode = Windowed
+			switch prev.Mode {
+			case Minimized, Fullscreen:
+			default:
+				w.config.Mode = Minimized
+				C.xdg_toplevel_set_minimized(w.topLvl)
+			}
 		case Maximized:
-			w.config.Mode = Windowed
-			w.size = w.wsize.Div(w.scale)
-			C.xdg_toplevel_unset_maximized(w.topLvl)
+			switch prev.Mode {
+			case Minimized, Fullscreen:
+			default:
+				w.config.Mode = Maximized
+				w.wsize = w.config.Size
+				C.xdg_toplevel_set_maximized(w.topLvl)
+				w.setTitle(prev, cnf)
+			}
+		case Windowed:
+			switch prev.Mode {
+			case Fullscreen:
+				w.config.Mode = Windowed
+				w.size = w.wsize.Div(w.scale)
+				C.xdg_toplevel_unset_fullscreen(w.topLvl)
+			case Minimized:
+				w.config.Mode = Windowed
+			case Maximized:
+				w.config.Mode = Windowed
+				w.size = w.wsize.Div(w.scale)
+				C.xdg_toplevel_unset_maximized(w.topLvl)
+			}
+			w.setTitle(prev, cnf)
+			if prev.Size != cnf.Size {
+				w.config.Size = cnf.Size
+				w.config.Size.Y += int(w.decoHeight()) * w.scale
+				w.size = w.config.Size.Div(w.scale)
+			}
+			w.config.MinSize = cnf.MinSize
+			w.config.MaxSize = cnf.MaxSize
+			w.setWindowConstraints()
 		}
-		w.setTitle(prev, cnf)
+	} else {
+		// For layer shell surfaces, apply size changes directly
 		if prev.Size != cnf.Size {
 			w.config.Size = cnf.Size
-			w.config.Size.Y += int(w.decoHeight()) * w.scale
 			w.size = w.config.Size.Div(w.scale)
 		}
-		w.config.MinSize = cnf.MinSize
-		w.config.MaxSize = cnf.MaxSize
-		w.setWindowConstraints()
 	}
 	w.ProcessEvent(ConfigEvent{Config: w.config})
 }
 
 func (w *window) setWindowConstraints() {
+	if w.topLvl == nil {
+		return
+	}
 	decoHeight := w.decoHeight()
 	if scaled := w.config.MinSize.Div(w.scale); scaled != (image.Point{}) {
 		C.xdg_toplevel_set_min_size(w.topLvl, C.int32_t(scaled.X), C.int32_t(scaled.Y+decoHeight))
@@ -1127,6 +1204,10 @@ func (w *window) decoHeight() int {
 }
 
 func (w *window) setTitle(prev, cnf Config) {
+	// Only set title for XDG toplevel windows, not layer shell surfaces
+	if w.topLvl == nil {
+		return
+	}
 	if prev.Title != cnf.Title {
 		w.config.Title = cnf.Title
 		title := C.CString(cnf.Title)
@@ -1147,6 +1228,10 @@ func (w *window) Perform(actions system.Action) {
 }
 
 func (w *window) move(serial C.uint32_t) {
+	// Layer shell surfaces cannot be moved by user interaction
+	if w.topLvl == nil {
+		return
+	}
 	s := w.disp.seat
 	if w.inCompositor || s.pointerFocus != w {
 		return
@@ -1156,6 +1241,10 @@ func (w *window) move(serial C.uint32_t) {
 }
 
 func (w *window) resize(serial, edge C.uint32_t) {
+	// Layer shell surfaces cannot be resized by user interaction
+	if w.topLvl == nil {
+		return
+	}
 	s := w.disp.seat
 	if w.inCompositor || s.pointerFocus != w {
 		return
@@ -1440,6 +1529,29 @@ func (d *wlDisplay) bindDataDevice() {
 	}
 }
 
+// createLayerSurface creates a layer surface for the given window.
+func (d *wlDisplay) createLayerSurface(w *window, output *C.struct_wl_output, layer Layer, namespace string) error {
+	if d.layerShell == nil {
+		return errors.New("wayland: layer shell not available")
+	}
+
+	cnamespace := C.CString(namespace)
+	defer C.free(unsafe.Pointer(cnamespace))
+
+	w.layerSurf = C.zwlr_layer_shell_v1_get_layer_surface(d.layerShell, w.surf, output, C.uint32_t(layer), cnamespace)
+	if w.layerSurf == nil {
+		return errors.New("wayland: failed to create layer surface")
+	}
+
+	w.layer = uint32(layer)
+	w.namespace = namespace
+
+	callbackStore(unsafe.Pointer(w.layerSurf), w)
+	C.zwlr_layer_surface_v1_add_listener(w.layerSurf, &C.gio_zwlr_layer_surface_v1_listener, unsafe.Pointer(w.surf))
+
+	return nil
+}
+
 func (d *wlDisplay) dispatch() error {
 	// wl_display_prepare_read records the current thread for
 	// use in wl_display_read_events or wl_display_cancel_events.
@@ -1520,6 +1632,9 @@ func (w *window) destroy() {
 	}
 	if w.cursor.theme != nil {
 		C.wl_cursor_theme_destroy(w.cursor.theme)
+	}
+	if w.layerSurf != nil {
+		C.zwlr_layer_surface_v1_destroy(w.layerSurf)
 	}
 	if w.topLvl != nil {
 		C.xdg_toplevel_destroy(w.topLvl)
@@ -1907,6 +2022,9 @@ func (d *wlDisplay) destroy() {
 	if d.decor != nil {
 		C.zxdg_decoration_manager_v1_destroy(d.decor)
 	}
+	if d.layerShell != nil {
+		C.zwlr_layer_shell_v1_destroy(d.layerShell)
+	}
 	if d.shm != nil {
 		C.wl_shm_destroy(d.shm)
 	}
@@ -1936,4 +2054,29 @@ func fromFixed(v C.wl_fixed_t) float32 {
 	b := ((1023 + 44) << 52) + (1 << 51) + uint64(v)
 	f := math.Float64frombits(b) - (3 << 43)
 	return float32(f)
+}
+
+//export gio_onLayerSurfaceConfigure
+func gio_onLayerSurfaceConfigure(data unsafe.Pointer, layerSurf *C.struct_zwlr_layer_surface_v1, serial C.uint32_t, width, height C.uint32_t) {
+	w := callbackLoad(data).(*window)
+	w.serial = serial
+	if width > 0 && height > 0 {
+		sz := image.Point{
+			X: int(width),
+			Y: int(height),
+		}
+		if sz != w.size {
+			w.size = sz
+		}
+	}
+	w.configured = true
+	// Acknowledge the configure event
+	C.zwlr_layer_surface_v1_ack_configure(layerSurf, serial)
+	w.draw(true)
+}
+
+//export gio_onLayerSurfaceClosed
+func gio_onLayerSurfaceClosed(data unsafe.Pointer, layerSurf *C.struct_zwlr_layer_surface_v1) {
+	w := callbackLoad(data).(*window)
+	w.closing = true
 }

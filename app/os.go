@@ -4,8 +4,10 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
+	"strings"
 
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -20,6 +22,92 @@ import (
 // errOutOfDate is reported when the GPU surface dimensions or properties no
 // longer match the window.
 var errOutOfDate = errors.New("app: GPU surface out of date")
+
+// Layer represents the layer where a layer shell surface should be placed.
+type Layer uint32
+
+const (
+	// LayerBackground places the surface in the desktop background layer.
+	LayerBackground Layer = 0
+	// LayerBottom places the surface below windows.
+	LayerBottom Layer = 1
+	// LayerTop places the surface above windows.
+	LayerTop Layer = 2
+	// LayerOverlay places the surface in the topmost layer.
+	LayerOverlay Layer = 3
+)
+
+func (l Layer) String() string {
+	switch l {
+	case LayerBackground:
+		return "background"
+	case LayerBottom:
+		return "bottom"
+	case LayerTop:
+		return "top"
+	case LayerOverlay:
+		return "overlay"
+	}
+	return ""
+}
+
+// Anchor represents anchor edges for layer shell surfaces (can be combined with bitwise OR).
+type Anchor uint32
+
+const (
+	// AnchorTop anchors the surface to the top edge.
+	AnchorTop Anchor = 1
+	// AnchorBottom anchors the surface to the bottom edge.
+	AnchorBottom Anchor = 2
+	// AnchorLeft anchors the surface to the left edge.
+	AnchorLeft Anchor = 4
+	// AnchorRight anchors the surface to the right edge.
+	AnchorRight Anchor = 8
+)
+
+func (a Anchor) String() string {
+	if a == 0 {
+		return "none"
+	}
+	var parts []string
+	if a&AnchorTop != 0 {
+		parts = append(parts, "top")
+	}
+	if a&AnchorBottom != 0 {
+		parts = append(parts, "bottom")
+	}
+	if a&AnchorLeft != 0 {
+		parts = append(parts, "left")
+	}
+	if a&AnchorRight != 0 {
+		parts = append(parts, "right")
+	}
+	return fmt.Sprintf("[%s]", strings.Join(parts, "|"))
+}
+
+// KeyboardInteractivity represents keyboard interaction modes for layer shell surfaces.
+type KeyboardInteractivity uint32
+
+const (
+	// KeyboardInteractivityNone means no keyboard focus is possible.
+	KeyboardInteractivityNone KeyboardInteractivity = 0
+	// KeyboardInteractivityExclusive requests exclusive keyboard focus.
+	KeyboardInteractivityExclusive KeyboardInteractivity = 1
+	// KeyboardInteractivityOnDemand uses normal focus semantics.
+	KeyboardInteractivityOnDemand KeyboardInteractivity = 2
+)
+
+func (k KeyboardInteractivity) String() string {
+	switch k {
+	case KeyboardInteractivityNone:
+		return "none"
+	case KeyboardInteractivityExclusive:
+		return "exclusive"
+	case KeyboardInteractivityOnDemand:
+		return "on-demand"
+	}
+	return ""
+}
 
 // Config describes a Window configuration.
 type Config struct {
@@ -50,6 +138,25 @@ type Config struct {
 	// decoHeight is the height of the fallback decoration for platforms such
 	// as Wayland that may need fallback client-side decorations.
 	decoHeight unit.Dp
+	// Layer shell configuration (Wayland only)
+	LayerShell struct {
+		// Enabled indicates whether to use layer shell instead of regular window
+		Enabled bool
+		// Layer specifies which layer to place the surface on
+		Layer Layer
+		// Namespace is a unique identifier for the layer surface
+		Namespace string
+		// Anchor specifies which edges to anchor the surface to
+		Anchor Anchor
+		// ExclusiveZone reserves screen space for this surface in pixels
+		ExclusiveZone int32
+		// KeyboardInteractivity controls keyboard focus behavior
+		KeyboardInteractivity KeyboardInteractivity
+		// Margin specifies the margin for the layer shell surface in pixels
+		Margin struct {
+			Top, Bottom, Left, Right int32
+		}
+	}
 }
 
 // ConfigEvent is sent whenever the configuration of a Window changes.

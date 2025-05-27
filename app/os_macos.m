@@ -14,6 +14,10 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 @interface GioWindowDelegate : NSObject<NSWindowDelegate>
 @end
 
+@interface GioLayerShellWindow : NSWindow
+@property int keyboardInteractivity;
+@end
+
 @interface GioView : NSView <CALayerDelegate,NSTextInputClient>
 @property uintptr_t handle;
 @property BOOL presentWithTrans;
@@ -59,6 +63,22 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 	if ([window firstResponder] == view) {
 		gio_onFocus(view.handle, 0);
 	}
+}
+@end
+
+@implementation GioLayerShellWindow
+- (BOOL)canBecomeKeyWindow {
+	// KeyboardInteractivityNone = 0, KeyboardInteractivityExclusive = 1, KeyboardInteractivityOnDemand = 2
+	return self.keyboardInteractivity != 0;
+}
+
+- (BOOL)canBecomeMainWindow {
+	// Only allow becoming main window for on-demand interactivity
+	return self.keyboardInteractivity == 2;
+}
+
+- (BOOL)acceptsFirstResponder {
+	return self.keyboardInteractivity != 0;
 }
 @end
 
@@ -372,10 +392,10 @@ void gio_setCursor(NSUInteger curID) {
 CFTypeRef gio_createWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, CGFloat minWidth, CGFloat minHeight, CGFloat maxWidth, CGFloat maxHeight) {
 	@autoreleasepool {
 		NSRect rect = NSMakeRect(0, 0, width, height);
-		NSUInteger styleMask = NSTitledWindowMask |
-			NSResizableWindowMask |
-			NSMiniaturizableWindowMask |
-			NSClosableWindowMask;
+		NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
+			NSWindowStyleMaskResizable |
+			NSWindowStyleMaskMiniaturizable |
+			NSWindowStyleMaskClosable;
 
 		NSWindow* window = [[NSWindow alloc] initWithContentRect:rect
 													   styleMask:styleMask
@@ -391,6 +411,34 @@ CFTypeRef gio_createWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, CGF
 		NSView *view = (__bridge NSView *)viewRef;
 		[window setContentView:view];
 		window.delegate = globalWindowDel;
+		return (__bridge_retained CFTypeRef)window;
+	}
+}
+
+CFTypeRef gio_createLayerShellWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, 
+									 int layer, int anchor, int keyboardInteractivity, 
+									 int marginTop, int marginBottom, int marginLeft, int marginRight) {
+	@autoreleasepool {
+		NSRect rect = NSMakeRect(0, 0, width, height);
+		
+		GioLayerShellWindow* window = [[GioLayerShellWindow alloc] initWithContentRect:rect
+																			 styleMask:NSWindowStyleMaskBorderless
+																			   backing:NSBackingStoreBuffered
+																				 defer:NO];
+		window.keyboardInteractivity = keyboardInteractivity;
+		
+		[window setAcceptsMouseMovedEvents:YES];
+		NSView *view = (__bridge NSView *)viewRef;
+		[window setContentView:view];
+		window.delegate = globalWindowDel;
+		
+		// Configure layer shell properties
+		configureLayerShellWindow((__bridge CFTypeRef)window, layer, anchor, keyboardInteractivity, YES);
+		
+		// Set initial position based on anchors
+		setWindowFrameForAnchors((__bridge CFTypeRef)window, width, height, anchor, 
+								 marginTop, marginBottom, marginLeft, marginRight);
+		
 		return (__bridge_retained CFTypeRef)window;
 	}
 }
@@ -455,5 +503,175 @@ void gio_main() {
 		globalWindowDel = [[GioWindowDelegate alloc] init];
 
 		[NSApp run];
+	}
+}
+
+// Layer shell support functions
+void setWindowLevel(CFTypeRef windowRef, int level) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		NSWindowLevel windowLevel;
+		switch (level) {
+			case 0: // LayerBackground
+				windowLevel = kCGDesktopWindowLevel;
+				break;
+			case 1: // LayerBottom
+				windowLevel = kCGNormalWindowLevel - 1;
+				break;
+			case 2: // LayerTop
+				windowLevel = kCGFloatingWindowLevel;
+				break;
+			case 3: // LayerOverlay
+				windowLevel = kCGScreenSaverWindowLevel;
+				break;
+			default:
+				windowLevel = kCGNormalWindowLevel;
+				break;
+		}
+		[window setLevel:windowLevel];
+	}
+}
+
+void setWindowCollectionBehavior(CFTypeRef windowRef, int canJoinAllSpaces, int stationary) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorDefault;
+		
+		if (canJoinAllSpaces) {
+			behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces;
+		}
+		if (stationary) {
+			behavior |= NSWindowCollectionBehaviorStationary;
+		}
+		
+		// For layer shell windows, we typically want them to be transient
+		// and not participate in normal window cycling
+		behavior |= NSWindowCollectionBehaviorTransient;
+		behavior |= NSWindowCollectionBehaviorIgnoresCycle;
+		
+		[window setCollectionBehavior:behavior];
+	}
+}
+
+void setWindowMovable(CFTypeRef windowRef, int movable) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		[window setMovable:movable];
+	}
+}
+
+NSRect getScreenFrame(CFTypeRef windowRef) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		return [[window screen] frame];
+	}
+}
+
+NSRect getScreenVisibleFrame(CFTypeRef windowRef) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		return [[window screen] visibleFrame];
+	}
+}
+
+void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height, 
+									 int anchor, int marginTop, int marginBottom, 
+									 int marginLeft, int marginRight) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		NSScreen *screen = [window screen];
+		if (!screen) {
+			screen = [NSScreen mainScreen];
+		}
+		
+		NSRect screenFrame = [screen frame];
+		NSRect visibleFrame = [screen visibleFrame];
+		
+		// Use visible frame for positioning to respect menu bar and dock
+		NSRect targetFrame = visibleFrame;
+		
+		// Apply margins
+		targetFrame.origin.x += marginLeft;
+		targetFrame.origin.y += marginBottom;
+		targetFrame.size.width -= (marginLeft + marginRight);
+		targetFrame.size.height -= (marginTop + marginBottom);
+		
+		CGFloat x = targetFrame.origin.x;
+		CGFloat y = targetFrame.origin.y;
+		CGFloat w = width;
+		CGFloat h = height;
+		
+		// Handle anchoring - if anchored to opposite edges, stretch to fill
+		// AnchorTop = 1, AnchorBottom = 2, AnchorLeft = 4, AnchorRight = 8
+		BOOL anchorTop = (anchor & 1) != 0;
+		BOOL anchorBottom = (anchor & 2) != 0;
+		BOOL anchorLeft = (anchor & 4) != 0;
+		BOOL anchorRight = (anchor & 8) != 0;
+		
+		// Horizontal positioning and sizing
+		if (anchorLeft && anchorRight) {
+			// Anchored to both left and right - stretch full width
+			x = targetFrame.origin.x;
+			w = targetFrame.size.width;
+		} else if (anchorLeft) {
+			// Anchored to left only
+			x = targetFrame.origin.x;
+			// Keep specified width
+		} else if (anchorRight) {
+			// Anchored to right only
+			x = targetFrame.origin.x + targetFrame.size.width - w;
+		} else {
+			// Not anchored horizontally - center
+			x = targetFrame.origin.x + (targetFrame.size.width - w) / 2;
+		}
+		
+		// Vertical positioning and sizing
+		if (anchorTop && anchorBottom) {
+			// Anchored to both top and bottom - stretch full height
+			y = targetFrame.origin.y;
+			h = targetFrame.size.height;
+		} else if (anchorTop) {
+			// Anchored to top only
+			y = targetFrame.origin.y + targetFrame.size.height - h;
+		} else if (anchorBottom) {
+			// Anchored to bottom only
+			y = targetFrame.origin.y;
+			// Keep specified height
+		} else {
+			// Not anchored vertically - center
+			y = targetFrame.origin.y + (targetFrame.size.height - h) / 2;
+		}
+		
+		NSRect newFrame = NSMakeRect(x, y, w, h);
+		[window setFrame:newFrame display:YES];
+	}
+}
+
+void configureLayerShellWindow(CFTypeRef windowRef, int layer, int anchor, 
+									  int keyboardInteractivity, int canJoinAllSpaces) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		
+		// Set window level based on layer
+		setWindowLevel(windowRef, layer);
+		
+		// Configure collection behavior
+		setWindowCollectionBehavior(windowRef, canJoinAllSpaces, YES);
+		
+		// Make window non-movable for layer shell
+		setWindowMovable(windowRef, NO);
+		
+		// Configure keyboard interactivity
+		if (keyboardInteractivity == 0) { // KeyboardInteractivityNone
+			// Prevent the window from becoming key
+			// This is a bit tricky in AppKit, we'll handle it in the window delegate
+		}
+		
+		// Remove standard window buttons and make borderless
+		NSWindowStyleMask styleMask = NSWindowStyleMaskBorderless;
+		[window setStyleMask:styleMask];
+		[window setHasShadow:NO];
+		[window setOpaque:NO];
+		[window setBackgroundColor:[NSColor clearColor]];
 	}
 }

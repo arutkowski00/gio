@@ -30,9 +30,10 @@ import (
 
 /*
 #cgo CFLAGS: -Werror -Wno-deprecated-declarations -fobjc-arc -x objective-c
-#cgo LDFLAGS: -framework AppKit -framework QuartzCore
+#cgo LDFLAGS: -framework AppKit -framework QuartzCore -framework CoreGraphics
 
 #include <AppKit/AppKit.h>
+#include <CoreGraphics/CoreGraphics.h>
 
 #define MOUSE_MOVE 1
 #define MOUSE_UP 2
@@ -42,6 +43,8 @@ import (
 __attribute__ ((visibility ("hidden"))) void gio_main(void);
 __attribute__ ((visibility ("hidden"))) CFTypeRef gio_createView(int presentWithTrans);
 __attribute__ ((visibility ("hidden"))) CFTypeRef gio_createWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, CGFloat minWidth, CGFloat minHeight, CGFloat maxWidth, CGFloat maxHeight);
+__attribute__ ((visibility ("hidden"))) CFTypeRef gio_createLayerShellWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, int layer, int anchor, int keyboardInteractivity, int marginTop, int marginBottom, int marginLeft, int marginRight);
+
 __attribute__ ((visibility ("hidden"))) void gio_viewSetHandle(CFTypeRef viewRef, uintptr_t handle);
 
 static void writeClipboard(CFTypeRef str) {
@@ -225,12 +228,7 @@ static void unhideWindow(CFTypeRef windowRef) {
 	}
 }
 
-static NSRect getScreenFrame(CFTypeRef windowRef) {
-	@autoreleasepool {
-		NSWindow* window = (__bridge NSWindow *)windowRef;
-		return [[window screen] frame];
-	}
-}
+
 
 static void setTitle(CFTypeRef windowRef, CFTypeRef titleRef) {
 	@autoreleasepool {
@@ -327,6 +325,15 @@ static int isMiniaturized(CFTypeRef windowRef) {
 		return window.miniaturized ? 1 : 0;
 	}
 }
+
+// Layer shell support function declarations (implemented in os_macos.m)
+void setWindowLevel(CFTypeRef windowRef, int level);
+void setWindowMovable(CFTypeRef windowRef, int movable);
+void setWindowCollectionBehavior(CFTypeRef windowRef, int canJoinAllSpaces, int stationary);
+void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height, int anchor, int marginTop, int marginBottom, int marginLeft, int marginRight);
+void configureLayerShellWindow(CFTypeRef windowRef, int layer, int anchor, int keyboardInteractivity, int canJoinAllSpaces);
+NSRect getScreenFrame(CFTypeRef windowRef);
+
 */
 import "C"
 
@@ -364,6 +371,17 @@ type window struct {
 	// cmdKeys is for storing the current key event while
 	// waiting for a doCommandBySelector.
 	cmdKeys cmdKeys
+
+	// Layer shell state
+	isLayerShell bool
+	layerConfig  struct {
+		layer                 Layer
+		anchor                Anchor
+		keyboardInteractivity KeyboardInteractivity
+		margins               struct {
+			top, bottom, left, right int32
+		}
+	}
 }
 
 type cmdKeys struct {
@@ -435,6 +453,42 @@ func (w *window) Configure(options []Option) {
 	cnf.apply(cfg, options)
 	window := C.windowForView(w.view)
 
+	// Handle layer shell configuration
+	if cnf.LayerShell.Enabled && w.isLayerShell {
+		// Update layer shell properties if they changed
+		if w.layerConfig.layer != cnf.LayerShell.Layer ||
+			w.layerConfig.anchor != cnf.LayerShell.Anchor ||
+			w.layerConfig.keyboardInteractivity != cnf.LayerShell.KeyboardInteractivity ||
+			w.layerConfig.margins.top != cnf.LayerShell.Margin.Top ||
+			w.layerConfig.margins.bottom != cnf.LayerShell.Margin.Bottom ||
+			w.layerConfig.margins.left != cnf.LayerShell.Margin.Left ||
+			w.layerConfig.margins.right != cnf.LayerShell.Margin.Right {
+
+			w.layerConfig.layer = cnf.LayerShell.Layer
+			w.layerConfig.anchor = cnf.LayerShell.Anchor
+			w.layerConfig.keyboardInteractivity = cnf.LayerShell.KeyboardInteractivity
+			w.layerConfig.margins.top = cnf.LayerShell.Margin.Top
+			w.layerConfig.margins.bottom = cnf.LayerShell.Margin.Bottom
+			w.layerConfig.margins.left = cnf.LayerShell.Margin.Left
+			w.layerConfig.margins.right = cnf.LayerShell.Margin.Right
+
+			// TODO: Reconfigure the layer shell window
+			// This will be implemented once the C functions are properly declared
+		}
+
+		// Handle size changes for layer shell windows
+		if w.config.Size != cnf.Size {
+			w.config.Size = cnf.Size
+			cnf.Size = cnf.Size.Div(int(screenScale))
+
+			// TODO: For layer shell, use anchor-based positioning
+			// This will be implemented once the C functions are properly declared
+			C.setSize(window, C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y))
+		}
+		return
+	}
+
+	// Regular window configuration (non-layer shell)
 	mask := C.getWindowStyleMask(window)
 	fullscreen := mask&C.NSWindowStyleMaskFullScreen != 0
 	switch cnf.Mode {
@@ -481,15 +535,18 @@ func (w *window) Configure(options []Option) {
 			C.zoomWindow(window)
 		}
 	}
-	style := C.NSWindowStyleMask(C.NSWindowStyleMaskTitled | C.NSWindowStyleMaskResizable | C.NSWindowStyleMaskMiniaturizable | C.NSWindowStyleMaskClosable)
-	style = C.NSWindowStyleMaskFullSizeContentView
-	mask &^= style
+	basicStyle := C.NSWindowStyleMask(C.NSWindowStyleMaskTitled | C.NSWindowStyleMaskResizable | C.NSWindowStyleMaskMiniaturizable | C.NSWindowStyleMaskClosable)
+	fullSizeStyle := C.NSWindowStyleMask(C.NSWindowStyleMaskFullSizeContentView)
+	mask &^= basicStyle
+	mask &^= fullSizeStyle
 	barTrans := C.int(C.NO)
 	titleVis := C.NSWindowTitleVisibility(C.NSWindowTitleVisible)
 	if !cnf.Decorated {
-		mask |= style
+		mask |= fullSizeStyle
 		barTrans = C.YES
 		titleVis = C.NSWindowTitleHidden
+	} else {
+		mask |= basicStyle
 	}
 	C.setWindowTitlebarAppearsTransparent(window, barTrans)
 	C.setWindowTitleVisibility(window, titleVis)
@@ -1010,16 +1067,46 @@ func newWindow(win *callbacks, options []Option) {
 			w.ProcessEvent(DestroyEvent{Err: err})
 			return
 		}
-		window := C.gio_createWindow(w.view, C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y), 0, 0, 0, 0)
+
+		var window C.CFTypeRef
+		if cnf.LayerShell.Enabled {
+			// Create layer shell window
+			w.isLayerShell = true
+			w.layerConfig.layer = cnf.LayerShell.Layer
+			w.layerConfig.anchor = cnf.LayerShell.Anchor
+			w.layerConfig.keyboardInteractivity = cnf.LayerShell.KeyboardInteractivity
+			w.layerConfig.margins.top = cnf.LayerShell.Margin.Top
+			w.layerConfig.margins.bottom = cnf.LayerShell.Margin.Bottom
+			w.layerConfig.margins.left = cnf.LayerShell.Margin.Left
+			w.layerConfig.margins.right = cnf.LayerShell.Margin.Right
+
+			// Create layer shell window with proper configuration
+			window = C.gio_createLayerShellWindow(w.view,
+				C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y),
+				C.int(cnf.LayerShell.Layer), C.int(cnf.LayerShell.Anchor),
+				C.int(cnf.LayerShell.KeyboardInteractivity),
+				C.int(cnf.LayerShell.Margin.Top), C.int(cnf.LayerShell.Margin.Bottom),
+				C.int(cnf.LayerShell.Margin.Left), C.int(cnf.LayerShell.Margin.Right))
+		} else {
+			// Create regular window
+			window = C.gio_createWindow(w.view, C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y), 0, 0, 0, 0)
+		}
+
 		// Release our reference now that the NSWindow has it.
 		C.CFRelease(w.view)
+
 		w.Configure(options)
-		if nextTopLeft.x == 0 && nextTopLeft.y == 0 {
-			// cascadeTopLeftFromPoint treats (0, 0) as a no-op,
-			// and just returns the offset we need for the first window.
+
+		if !w.isLayerShell {
+			// Only do cascading for regular windows
+			if nextTopLeft.x == 0 && nextTopLeft.y == 0 {
+				// cascadeTopLeftFromPoint treats (0, 0) as a no-op,
+				// and just returns the offset we need for the first window.
+				nextTopLeft = C.cascadeTopLeftFromPoint(window, nextTopLeft)
+			}
 			nextTopLeft = C.cascadeTopLeftFromPoint(window, nextTopLeft)
 		}
-		nextTopLeft = C.cascadeTopLeftFromPoint(window, nextTopLeft)
+
 		C.makeFirstResponder(window, w.view)
 		// makeKeyAndOrderFront assumes ownership of our window reference.
 		C.makeKeyAndOrderFront(window)
@@ -1165,4 +1252,40 @@ func (AppKitViewEvent) implementsViewEvent() {}
 func (AppKitViewEvent) ImplementsEvent()     {}
 func (a AppKitViewEvent) Valid() bool {
 	return a != (AppKitViewEvent{})
+}
+
+func (w *window) configureLayerShell() {
+	if !w.isLayerShell {
+		return
+	}
+
+	window := C.windowForView(w.view)
+	if window == 0 {
+		return
+	}
+
+	// Set window level based on layer
+	var windowLevel C.int
+	switch w.layerConfig.layer {
+	case LayerBackground:
+		windowLevel = C.int(C.kCGDesktopWindowLevel)
+	case LayerBottom:
+		windowLevel = C.int(C.kCGNormalWindowLevel - 1)
+	case LayerTop:
+		windowLevel = C.int(C.kCGFloatingWindowLevel)
+	case LayerOverlay:
+		windowLevel = C.int(C.kCGScreenSaverWindowLevel)
+	default:
+		windowLevel = C.int(C.kCGNormalWindowLevel)
+	}
+
+	// Apply layer shell window properties
+	C.setWindowLevel(window, windowLevel)
+	C.setWindowMovable(window, 0) // Layer shell windows are not movable
+
+	// Configure collection behavior for all spaces
+	C.setWindowCollectionBehavior(window, 1, 1)
+
+	// Make window borderless
+	C.setWindowStyleMask(window, C.NSWindowStyleMaskBorderless)
 }

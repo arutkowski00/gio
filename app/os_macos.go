@@ -47,6 +47,22 @@ __attribute__ ((visibility ("hidden"))) CFTypeRef gio_createLayerShellWindow(CFT
 
 __attribute__ ((visibility ("hidden"))) void gio_viewSetHandle(CFTypeRef viewRef, uintptr_t handle);
 
+typedef struct {
+    double width;
+    double height;
+} ScreenSize;
+
+static ScreenSize getMainScreenSize(void);
+
+static ScreenSize getMainScreenSize() {
+    @autoreleasepool {
+        NSScreen *mainScreen = [NSScreen mainScreen];
+        NSRect frame = [mainScreen frame];
+        ScreenSize size = {frame.size.width, frame.size.height};
+        return size;
+    }
+}
+
 static void writeClipboard(CFTypeRef str) {
 	@autoreleasepool {
 		NSString *s = (__bridge NSString *)str;
@@ -427,12 +443,15 @@ func (w *window) WriteClipboard(mime string, s []byte) {
 func (w *window) updateWindowMode() {
 	w.scale = float32(C.getViewBackingScale(w.view))
 	wf, hf := float32(C.viewWidth(w.view)), float32(C.viewHeight(w.view))
+
+	window := C.windowForView(w.view)
+
 	w.config.Size = image.Point{
 		X: int(wf*w.scale + .5),
 		Y: int(hf*w.scale + .5),
 	}
+
 	w.config.Mode = Windowed
-	window := C.windowForView(w.view)
 	if window == 0 {
 		return
 	}
@@ -472,18 +491,48 @@ func (w *window) Configure(options []Option) {
 			w.layerConfig.margins.left = cnf.LayerShell.Margin.Left
 			w.layerConfig.margins.right = cnf.LayerShell.Margin.Right
 
-			// TODO: Reconfigure the layer shell window
-			// This will be implemented once the C functions are properly declared
+			// Reconfigure the layer shell window with new properties
+			C.configureLayerShellWindow(window, C.int(cnf.LayerShell.Layer), C.int(cnf.LayerShell.Anchor),
+				C.int(cnf.LayerShell.KeyboardInteractivity), 1)
 		}
 
 		// Handle size changes for layer shell windows
 		if w.config.Size != cnf.Size {
 			w.config.Size = cnf.Size
-			cnf.Size = cnf.Size.Div(int(screenScale))
 
-			// TODO: For layer shell, use anchor-based positioning
-			// This will be implemented once the C functions are properly declared
-			C.setSize(window, C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y))
+			// Get actual screen dimensions for proper sizing
+			screenSize := C.getMainScreenSize()
+			screenWidth := float64(screenSize.width)
+			screenHeight := float64(screenSize.height)
+
+			// Apply scaling to the configured size (same as regular windows)
+			scaledSize := cnf.Size.Div(int(screenScale))
+			layerWidth := float64(scaledSize.X)
+			layerHeight := float64(scaledSize.Y)
+
+			// For full-width layer shell windows, use actual screen width
+			if layerWidth == 0 && (cnf.LayerShell.Anchor&AnchorLeft != 0) && (cnf.LayerShell.Anchor&AnchorRight != 0) {
+				layerWidth = screenWidth
+			}
+
+			// For full-height layer shell windows, use actual screen height
+			if layerHeight == 0 && (cnf.LayerShell.Anchor&AnchorTop != 0) && (cnf.LayerShell.Anchor&AnchorBottom != 0) {
+				layerHeight = screenHeight
+			}
+
+			// Ensure minimum dimensions to prevent window creation failure
+			if layerWidth <= 0 {
+				layerWidth = screenWidth // Use screen width as fallback
+			}
+			if layerHeight <= 0 {
+				layerHeight = screenHeight // Use screen height as fallback
+			}
+
+			// Use anchor-based positioning through the layer shell system
+			C.setWindowFrameForAnchors(window, C.CGFloat(layerWidth), C.CGFloat(layerHeight),
+				C.int(cnf.LayerShell.Anchor),
+				C.int(cnf.LayerShell.Margin.Top), C.int(cnf.LayerShell.Margin.Bottom),
+				C.int(cnf.LayerShell.Margin.Left), C.int(cnf.LayerShell.Margin.Right))
 		}
 		return
 	}
@@ -1080,9 +1129,40 @@ func newWindow(win *callbacks, options []Option) {
 			w.layerConfig.margins.left = cnf.LayerShell.Margin.Left
 			w.layerConfig.margins.right = cnf.LayerShell.Margin.Right
 
+			// Get screen scale for proper sizing
+			screenScale := float32(C.getScreenBackingScale())
+
+			// Get actual screen dimensions for proper sizing
+			screenSize := C.getMainScreenSize()
+			screenWidth := float64(screenSize.width)
+			screenHeight := float64(screenSize.height)
+
+			// Apply scaling to the configured size (same as regular windows)
+			scaledSize := cnf.Size.Div(int(screenScale))
+			layerWidth := float64(scaledSize.X)
+			layerHeight := float64(scaledSize.Y)
+
+			// For full-width layer shell windows, use actual screen width
+			if layerWidth == 0 && (cnf.LayerShell.Anchor&AnchorLeft != 0) && (cnf.LayerShell.Anchor&AnchorRight != 0) {
+				layerWidth = screenWidth
+			}
+
+			// For full-height layer shell windows, use actual screen height
+			if layerHeight == 0 && (cnf.LayerShell.Anchor&AnchorTop != 0) && (cnf.LayerShell.Anchor&AnchorBottom != 0) {
+				layerHeight = screenHeight
+			}
+
+			// Ensure minimum dimensions to prevent window creation failure
+			if layerWidth <= 0 {
+				layerWidth = screenWidth // Use screen width as fallback
+			}
+			if layerHeight <= 0 {
+				layerHeight = screenHeight // Use screen height as fallback
+			}
+
 			// Create layer shell window with proper configuration
 			window = C.gio_createLayerShellWindow(w.view,
-				C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y),
+				C.CGFloat(layerWidth), C.CGFloat(layerHeight),
 				C.int(cnf.LayerShell.Layer), C.int(cnf.LayerShell.Anchor),
 				C.int(cnf.LayerShell.KeyboardInteractivity),
 				C.int(cnf.LayerShell.Margin.Top), C.int(cnf.LayerShell.Margin.Bottom),

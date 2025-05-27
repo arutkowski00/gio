@@ -587,8 +587,22 @@ void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height
 		NSRect screenFrame = [screen frame];
 		NSRect visibleFrame = [screen visibleFrame];
 		
-		// Use visible frame for positioning to respect menu bar and dock
-		NSRect targetFrame = visibleFrame;
+		// For layer shell windows, we want to use different frames based on anchoring
+		NSRect targetFrame;
+		BOOL anchorTop = (anchor & 1) != 0;
+		BOOL anchorBottom = (anchor & 2) != 0;
+		BOOL anchorLeft = (anchor & 4) != 0;
+		BOOL anchorRight = (anchor & 8) != 0;
+		
+		// Use full screen frame for top-anchored windows (status bars)
+		// Use visible frame for other positions to respect menu bar and dock
+		if (anchorTop && !anchorBottom) {
+			// Top-anchored status bar should use full screen width and be above menu bar
+			targetFrame = screenFrame;
+		} else {
+			// Other positions should respect menu bar and dock
+			targetFrame = visibleFrame;
+		}
 		
 		// Apply margins
 		targetFrame.origin.x += marginLeft;
@@ -600,13 +614,6 @@ void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height
 		CGFloat y = targetFrame.origin.y;
 		CGFloat w = width;
 		CGFloat h = height;
-		
-		// Handle anchoring - if anchored to opposite edges, stretch to fill
-		// AnchorTop = 1, AnchorBottom = 2, AnchorLeft = 4, AnchorRight = 8
-		BOOL anchorTop = (anchor & 1) != 0;
-		BOOL anchorBottom = (anchor & 2) != 0;
-		BOOL anchorLeft = (anchor & 4) != 0;
-		BOOL anchorRight = (anchor & 8) != 0;
 		
 		// Horizontal positioning and sizing
 		if (anchorLeft && anchorRight) {
@@ -631,7 +638,7 @@ void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height
 			y = targetFrame.origin.y;
 			h = targetFrame.size.height;
 		} else if (anchorTop) {
-			// Anchored to top only
+			// Anchored to top only - position at the very top
 			y = targetFrame.origin.y + targetFrame.size.height - h;
 		} else if (anchorBottom) {
 			// Anchored to bottom only
@@ -644,6 +651,19 @@ void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height
 		
 		NSRect newFrame = NSMakeRect(x, y, w, h);
 		[window setFrame:newFrame display:YES];
+		
+		// IMPORTANT: Resize the content view AND all its subviews to match the window's content area
+		// This ensures the Gio view reports the correct size
+		NSView *contentView = [window contentView];
+		if (contentView) {
+			NSRect contentFrame = NSMakeRect(0, 0, newFrame.size.width, newFrame.size.height);
+			[contentView setFrame:contentFrame];
+			
+			// Also resize all subviews (including the Gio view) to match
+			for (NSView *subview in [contentView subviews]) {
+				[subview setFrame:contentFrame];
+			}
+		}
 	}
 }
 

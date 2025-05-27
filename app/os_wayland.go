@@ -1799,7 +1799,7 @@ func (w *window) onPointerMotion(x, y C.wl_fixed_t, t C.uint32_t) {
 // updateCursor updates the system gesture cursor according to the pointer
 // position.
 func (w *window) systemGesture() (*C.struct_wl_cursor, C.uint32_t) {
-	if w.config.Mode != Windowed || w.config.Decorated {
+	if w.config.Mode != Windowed || w.config.Decorated || w.config.LayerShell.Enabled {
 		return nil, 0
 	}
 	_, cfg := w.getConfig()

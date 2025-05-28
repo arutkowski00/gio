@@ -405,7 +405,7 @@ func (d *wlDisplay) createNativeWindow(options []Option) (*window, error) {
 		if config.LayerShell.KeyboardInteractivity != 0 {
 			C.zwlr_layer_surface_v1_set_keyboard_interactivity(w.layerSurf, C.uint32_t(config.LayerShell.KeyboardInteractivity))
 		}
-		if config.Size.X > 0 && config.Size.Y > 0 {
+		if config.Size.X > 0 || config.Size.Y > 0 {
 			C.zwlr_layer_surface_v1_set_size(w.layerSurf, C.uint32_t(config.Size.X), C.uint32_t(config.Size.Y))
 		}
 		if config.LayerShell.Margin.Top != 0 || config.LayerShell.Margin.Bottom != 0 || config.LayerShell.Margin.Left != 0 || config.LayerShell.Margin.Right != 0 {

@@ -18,6 +18,15 @@ CALayer *gio_layerFactory(BOOL presentWithTrans) {
 		l.autoresizingMask = kCALayerHeightSizable|kCALayerWidthSizable;
 		l.needsDisplayOnBoundsChange = YES;
 		l.presentsWithTransaction = presentWithTrans;
+
+		// For transparency support, we need to configure the layer properly
+		// Note: presentWithTrans is not about transparency, but about presentation synchronization
+		// We should check if the view's window is configured for transparency
+		// For now, we'll configure for transparency support by default since it doesn't hurt
+		l.opaque = NO;
+		// Set pixel format to support alpha
+		l.pixelFormat = MTLPixelFormatBGRA8Unorm;
+
 		return l;
 	}
 }

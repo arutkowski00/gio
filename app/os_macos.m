@@ -116,6 +116,11 @@ static void handleMouse(GioView *view, NSEvent *event, int typ, CGFloat dx, CGFl
 - (void)viewDidMoveToWindow {
 	gio_onAttached(self.handle, self.window != nil ? 1 : 0);
 }
+- (BOOL)isOpaque {
+	// Return NO to enable transparency support for layer shell windows and other transparent content
+	// This allows the NSView to properly participate in alpha blending
+	return NO;
+}
 - (void)mouseDown:(NSEvent *)event {
 	handleMouse(self, event, MOUSE_DOWN, 0, 0);
 }

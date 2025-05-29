@@ -298,6 +298,11 @@ func (w *Window) Option(opts ...Option) {
 		for _, opt := range opts {
 			opt(w.metric, &cnf)
 		}
+		// Update decoration theme to match main theme if theme was changed
+		// This ensures GPU clear color matches the main window theme
+		if cnf.Theme != nil {
+			w.decorations.Theme = cnf.Theme
+		}
 		w.decorations.enabled = cnf.Decorated
 		decoHeight := w.decorations.height
 		if !w.decorations.enabled {

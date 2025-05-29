@@ -9,7 +9,11 @@
 
 CALayer *gio_layerFactory(BOOL presentWithTrans) {
 	@autoreleasepool {
-		return [CALayer layer];
+		CALayer *layer = [CALayer layer];
+		// Configure layer for transparency support
+		layer.opaque = NO;
+		layer.backgroundColor = [NSColor clearColor].CGColor;
+		return layer;
 	}
 }
 

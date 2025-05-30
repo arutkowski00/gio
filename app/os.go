@@ -141,7 +141,7 @@ type Config struct {
 	// decoHeight is the height of the fallback decoration for platforms such
 	// as Wayland that may need fallback client-side decorations.
 	decoHeight unit.Dp
-	// Layer shell configuration (Wayland only)
+	// Layer shell configuration (Wayland and macOS)
 	LayerShell struct {
 		// Enabled indicates whether to use layer shell instead of regular window
 		Enabled bool

@@ -394,23 +394,6 @@ func (d *wlDisplay) createNativeWindow(options []Option) (*window, error) {
 			w.destroy()
 			return nil, err
 		}
-
-		// Configure layer surface properties
-		if config.LayerShell.Anchor != 0 {
-			C.zwlr_layer_surface_v1_set_anchor(w.layerSurf, C.uint32_t(config.LayerShell.Anchor))
-		}
-		if config.LayerShell.ExclusiveZone != 0 {
-			C.zwlr_layer_surface_v1_set_exclusive_zone(w.layerSurf, C.int32_t(config.LayerShell.ExclusiveZone))
-		}
-		if config.LayerShell.KeyboardInteractivity != 0 {
-			C.zwlr_layer_surface_v1_set_keyboard_interactivity(w.layerSurf, C.uint32_t(config.LayerShell.KeyboardInteractivity))
-		}
-		if config.Size.X > 0 && config.Size.Y > 0 {
-			C.zwlr_layer_surface_v1_set_size(w.layerSurf, C.uint32_t(config.Size.X), C.uint32_t(config.Size.Y))
-		}
-		if config.LayerShell.Margin.Top != 0 || config.LayerShell.Margin.Bottom != 0 || config.LayerShell.Margin.Left != 0 || config.LayerShell.Margin.Right != 0 {
-			C.zwlr_layer_surface_v1_set_margin(w.layerSurf, C.int32_t(config.LayerShell.Margin.Top), C.int32_t(config.LayerShell.Margin.Right), C.int32_t(config.LayerShell.Margin.Bottom), C.int32_t(config.LayerShell.Margin.Left))
-		}
 	} else {
 		// Create regular XDG window
 		if d.wm == nil {
@@ -1126,7 +1109,36 @@ func (w *window) Configure(options []Option) {
 		if prev.Size != cnf.Size {
 			w.config.Size = cnf.Size
 			w.size = w.config.Size.Div(w.scale)
+			// Update layer surface size
+			if w.layerSurf != nil && (cnf.Size.X > 0 || cnf.Size.Y > 0) {
+				C.zwlr_layer_surface_v1_set_size(w.layerSurf, C.uint32_t(cnf.Size.X), C.uint32_t(cnf.Size.Y))
+			}
 		}
+
+		if w.layerSurf != nil {
+			if prev.LayerShell.Anchor != cnf.LayerShell.Anchor {
+				w.config.LayerShell.Anchor = cnf.LayerShell.Anchor
+				C.zwlr_layer_surface_v1_set_anchor(w.layerSurf, C.uint32_t(cnf.LayerShell.Anchor))
+			}
+			if prev.LayerShell.KeyboardInteractivity != cnf.LayerShell.KeyboardInteractivity {
+				w.config.LayerShell.KeyboardInteractivity = cnf.LayerShell.KeyboardInteractivity
+				C.zwlr_layer_surface_v1_set_keyboard_interactivity(w.layerSurf, C.uint32_t(cnf.LayerShell.KeyboardInteractivity))
+			}
+			if prev.LayerShell.Margin != cnf.LayerShell.Margin {
+				w.config.LayerShell.Margin = cnf.LayerShell.Margin
+				C.zwlr_layer_surface_v1_set_margin(w.layerSurf, C.int32_t(cnf.LayerShell.Margin.Top), C.int32_t(cnf.LayerShell.Margin.Right), C.int32_t(cnf.LayerShell.Margin.Bottom), C.int32_t(cnf.LayerShell.Margin.Left))
+			}
+			if prev.LayerShell.ExclusiveZone != cnf.LayerShell.ExclusiveZone {
+				w.config.LayerShell.ExclusiveZone = cnf.LayerShell.ExclusiveZone
+				C.zwlr_layer_surface_v1_set_exclusive_zone(w.layerSurf, C.int32_t(cnf.LayerShell.ExclusiveZone))
+			}
+		}
+
+		// Commit the surface to apply changes
+		if w.surf != nil {
+			C.wl_surface_commit(w.surf)
+		}
+
 		w.ProcessEvent(ConfigEvent{Config: w.config})
 		return
 	}
@@ -1799,7 +1811,7 @@ func (w *window) onPointerMotion(x, y C.wl_fixed_t, t C.uint32_t) {
 // updateCursor updates the system gesture cursor according to the pointer
 // position.
 func (w *window) systemGesture() (*C.struct_wl_cursor, C.uint32_t) {
-	if w.config.Mode != Windowed || w.config.Decorated {
+	if w.config.Mode != Windowed || w.config.Decorated || w.config.LayerShell.Enabled {
 		return nil, 0
 	}
 	_, cfg := w.getConfig()

@@ -14,6 +14,10 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 @interface GioWindowDelegate : NSObject<NSWindowDelegate>
 @end
 
+@interface GioLayerShellWindow : NSPanel
+@property int keyboardInteractivity;
+@end
+
 @interface GioView : NSView <CALayerDelegate,NSTextInputClient>
 @property uintptr_t handle;
 @property BOOL presentWithTrans;
@@ -48,17 +52,29 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 }
 - (void)windowDidBecomeKey:(NSNotification *)notification {
 	NSWindow *window = (NSWindow *)[notification object];
-	GioView *view = (GioView *)window.contentView;
-	if ([window firstResponder] == view) {
+	GioView *view = (GioView *)[window contentView];
+	if (view) {
 		gio_onFocus(view.handle, 1);
 	}
 }
 - (void)windowDidResignKey:(NSNotification *)notification {
 	NSWindow *window = (NSWindow *)[notification object];
-	GioView *view = (GioView *)window.contentView;
-	if ([window firstResponder] == view) {
+	GioView *view = (GioView *)[window contentView];
+	if (view) {
 		gio_onFocus(view.handle, 0);
 	}
+}
+@end
+
+@implementation GioLayerShellWindow
+- (BOOL)canBecomeKeyWindow {
+	// Layer shell windows should never become key windows to prevent focus
+	return NO;
+}
+
+- (BOOL)canBecomeMainWindow {
+	// Layer shell windows should never become main windows
+	return NO;
 }
 @end
 
@@ -95,6 +111,11 @@ static void handleMouse(GioView *view, NSEvent *event, int typ, CGFloat dx, CGFl
 }
 - (void)viewDidMoveToWindow {
 	gio_onAttached(self.handle, self.window != nil ? 1 : 0);
+}
+- (BOOL)isOpaque {
+	// Return NO to enable transparency support for layer shell windows and other transparent content
+	// This allows the NSView to properly participate in alpha blending
+	return NO;
 }
 - (void)mouseDown:(NSEvent *)event {
 	handleMouse(self, event, MOUSE_DOWN, 0, 0);
@@ -372,10 +393,10 @@ void gio_setCursor(NSUInteger curID) {
 CFTypeRef gio_createWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, CGFloat minWidth, CGFloat minHeight, CGFloat maxWidth, CGFloat maxHeight) {
 	@autoreleasepool {
 		NSRect rect = NSMakeRect(0, 0, width, height);
-		NSUInteger styleMask = NSTitledWindowMask |
-			NSResizableWindowMask |
-			NSMiniaturizableWindowMask |
-			NSClosableWindowMask;
+		NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
+			NSWindowStyleMaskResizable |
+			NSWindowStyleMaskMiniaturizable |
+			NSWindowStyleMaskClosable;
 
 		NSWindow* window = [[NSWindow alloc] initWithContentRect:rect
 													   styleMask:styleMask
@@ -392,6 +413,42 @@ CFTypeRef gio_createWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, CGF
 		[window setContentView:view];
 		window.delegate = globalWindowDel;
 		return (__bridge_retained CFTypeRef)window;
+	}
+}
+
+CFTypeRef gio_createLayerShellWindow(CFTypeRef viewRef, CGFloat width, CGFloat height, 
+									 int layer, int anchor, int keyboardInteractivity, 
+									 int marginTop, int marginBottom, int marginLeft, int marginRight) {
+	@autoreleasepool {
+		NSRect rect = NSMakeRect(0, 0, width, height);
+		
+		// Create as NSPanel (not NSWindow) for better focus behavior
+		GioLayerShellWindow* panel = [[GioLayerShellWindow alloc] initWithContentRect:rect
+																			styleMask:NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless
+																			  backing:NSBackingStoreBuffered
+																				defer:NO];
+		
+		panel.keyboardInteractivity = keyboardInteractivity;
+		
+		// Basic panel configuration
+		[panel setAcceptsMouseMovedEvents:YES];
+		
+		// Ensure panel never becomes key or main
+		[panel setLevel:NSFloatingWindowLevel]; // Will be overridden by layer config
+		[panel setHidesOnDeactivate:NO];
+		
+		NSView *view = (__bridge NSView *)viewRef;
+		[panel setContentView:view];
+		panel.delegate = globalWindowDel;
+		
+		// Configure layer shell properties
+		configureLayerShellWindow((__bridge CFTypeRef)panel, layer, anchor, keyboardInteractivity, YES);
+		
+		// Set initial position based on anchors
+		setWindowFrameForAnchors((__bridge CFTypeRef)panel, width, height, anchor, 
+								 marginTop, marginBottom, marginLeft, marginRight);
+		
+		return (__bridge_retained CFTypeRef)panel;
 	}
 }
 
@@ -424,8 +481,22 @@ void gio_viewSetHandle(CFTypeRef viewRef, uintptr_t handle) {
 
 @implementation GioAppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
-	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-	[NSApp activateIgnoringOtherApps:YES];
+	// Check if we should use accessory mode (for layer shell/status bar apps)
+	// This prevents the app from showing in the dock and app switcher
+	BOOL hasLayerShellWindows = NO;
+	for (NSWindow *window in [NSApp windows]) {
+		if ([window isKindOfClass:[GioLayerShellWindow class]]) {
+			hasLayerShellWindows = YES;
+			break;
+		}
+	}
+	
+	if (hasLayerShellWindows) {
+		[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+	} else {
+		[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		[NSApp activateIgnoringOtherApps:YES];
+	}
 	gio_onFinishLaunching();
 }
 @end
@@ -455,5 +526,214 @@ void gio_main() {
 		globalWindowDel = [[GioWindowDelegate alloc] init];
 
 		[NSApp run];
+	}
+}
+
+// Layer shell support functions
+void setWindowLevel(CFTypeRef windowRef, int level) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		NSWindowLevel windowLevel;
+		switch (level) {
+			case 0: // LayerBackground
+				windowLevel = kCGDesktopWindowLevel;
+				break;
+			case 1: // LayerBottom
+				windowLevel = kCGNormalWindowLevel - 1;
+				break;
+			case 2: // LayerTop
+				windowLevel = kCGFloatingWindowLevel;
+				break;
+			case 3: // LayerOverlay
+				windowLevel = kCGScreenSaverWindowLevel;
+				break;
+			default:
+				windowLevel = kCGNormalWindowLevel;
+				break;
+		}
+		[window setLevel:windowLevel];
+	}
+}
+
+void setWindowCollectionBehavior(CFTypeRef windowRef, int canJoinAllSpaces, int stationary) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		NSWindowCollectionBehavior behavior = NSWindowCollectionBehaviorDefault;
+		
+		if (canJoinAllSpaces) {
+			behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces;
+		}
+		if (stationary) {
+			behavior |= NSWindowCollectionBehaviorStationary;
+		}
+		
+		// For layer shell windows, we want them to be completely invisible 
+		// to the user's normal window management
+		behavior |= NSWindowCollectionBehaviorTransient;
+		behavior |= NSWindowCollectionBehaviorIgnoresCycle;
+		
+		[window setCollectionBehavior:behavior];
+	}
+}
+
+void setWindowMovable(CFTypeRef windowRef, int movable) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		[window setMovable:movable];
+	}
+}
+
+NSRect getScreenFrame(CFTypeRef windowRef) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		return [[window screen] frame];
+	}
+}
+
+NSRect getScreenVisibleFrame(CFTypeRef windowRef) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		return [[window screen] visibleFrame];
+	}
+}
+
+void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height, 
+									 int anchor, int marginTop, int marginBottom, 
+									 int marginLeft, int marginRight) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		NSScreen *screen = [window screen];
+		if (!screen) {
+			screen = [NSScreen mainScreen];
+		}
+		
+		NSRect screenFrame = [screen frame];
+		NSRect visibleFrame = [screen visibleFrame];
+		
+		// For layer shell windows, we want to use different frames based on anchoring
+		NSRect targetFrame;
+		BOOL anchorTop = (anchor & 1) != 0;
+		BOOL anchorBottom = (anchor & 2) != 0;
+		BOOL anchorLeft = (anchor & 4) != 0;
+		BOOL anchorRight = (anchor & 8) != 0;
+		
+		// Use full screen frame for top-anchored windows (status bars)
+		// Use visible frame for other positions to respect menu bar and dock
+		if (anchorTop && !anchorBottom) {
+			// Top-anchored status bar should use full screen width and be above menu bar
+			targetFrame = screenFrame;
+		} else {
+			// Other positions should respect menu bar and dock
+			targetFrame = visibleFrame;
+		}
+		
+		// Apply margins
+		targetFrame.origin.x += marginLeft;
+		targetFrame.origin.y += marginBottom;
+		targetFrame.size.width -= (marginLeft + marginRight);
+		targetFrame.size.height -= (marginTop + marginBottom);
+		
+		CGFloat x = targetFrame.origin.x;
+		CGFloat y = targetFrame.origin.y;
+		CGFloat w = width;
+		CGFloat h = height;
+		
+		// Horizontal positioning and sizing
+		if (anchorLeft && anchorRight) {
+			// Anchored to both left and right - stretch full width
+			x = targetFrame.origin.x;
+			w = targetFrame.size.width;
+		} else if (anchorLeft) {
+			// Anchored to left only
+			x = targetFrame.origin.x;
+			// Keep specified width
+		} else if (anchorRight) {
+			// Anchored to right only
+			x = targetFrame.origin.x + targetFrame.size.width - w;
+		} else {
+			// Not anchored horizontally - center
+			x = targetFrame.origin.x + (targetFrame.size.width - w) / 2;
+		}
+		
+		// Vertical positioning and sizing
+		if (anchorTop && anchorBottom) {
+			// Anchored to both top and bottom - stretch full height
+			y = targetFrame.origin.y;
+			h = targetFrame.size.height;
+		} else if (anchorTop) {
+			// Anchored to top only - position at the very top
+			y = targetFrame.origin.y + targetFrame.size.height - h;
+		} else if (anchorBottom) {
+			// Anchored to bottom only
+			y = targetFrame.origin.y;
+			// Keep specified height
+		} else {
+			// Not anchored vertically - center
+			y = targetFrame.origin.y + (targetFrame.size.height - h) / 2;
+		}
+		
+		NSRect newFrame = NSMakeRect(x, y, w, h);
+		[window setFrame:newFrame display:YES];
+		
+		// IMPORTANT: Resize the content view AND all its subviews to match the window's content area
+		// This ensures the Gio view reports the correct size
+		NSView *contentView = [window contentView];
+		if (contentView) {
+			NSRect contentFrame = NSMakeRect(0, 0, newFrame.size.width, newFrame.size.height);
+			[contentView setFrame:contentFrame];
+			
+			// Also resize all subviews (including the Gio view) to match
+			for (NSView *subview in [contentView subviews]) {
+				[subview setFrame:contentFrame];
+			}
+		}
+	}
+}
+
+void configureLayerShellWindow(CFTypeRef windowRef, int layer, int anchor, 
+									  int keyboardInteractivity, int canJoinAllSpaces) {
+	@autoreleasepool {
+		NSWindow *window = (__bridge NSWindow *)windowRef;
+		
+		// Set window level based on layer
+		setWindowLevel(windowRef, layer);
+		
+		// Configure collection behavior
+		setWindowCollectionBehavior(windowRef, canJoinAllSpaces, YES);
+		
+		// Make window non-movable for layer shell
+		setWindowMovable(windowRef, NO);
+		
+		// Configure keyboard interactivity
+		if (keyboardInteractivity == 0) { // KeyboardInteractivityNone
+			// Prevent the window from becoming key
+			// This is a bit tricky in AppKit, we'll handle it in the window delegate
+		}
+		
+		// Remove standard window buttons and make borderless
+		NSWindowStyleMask styleMask = NSWindowStyleMaskBorderless;
+		[window setStyleMask:styleMask];
+		[window setHasShadow:NO];
+		[window setOpaque:NO];
+		[window setBackgroundColor:[NSColor clearColor]];
+	}
+}
+
+void updateActivationPolicyForLayerShell(void) {
+	@autoreleasepool {
+		// Check if we have any layer shell windows
+		BOOL hasLayerShellWindows = NO;
+		for (NSWindow *window in [NSApp windows]) {
+			if ([window isKindOfClass:[GioLayerShellWindow class]]) {
+				hasLayerShellWindows = YES;
+				break;
+			}
+		}
+		
+		if (hasLayerShellWindows) {
+			[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+		} else {
+			[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		}
 	}
 }

@@ -47,6 +47,8 @@ __attribute__ ((visibility ("hidden"))) CFTypeRef gio_createLayerShellWindow(CFT
 
 __attribute__ ((visibility ("hidden"))) void gio_viewSetHandle(CFTypeRef viewRef, uintptr_t handle);
 
+__attribute__ ((visibility ("hidden"))) void updateActivationPolicyForLayerShell(void);
+
 typedef struct {
     double width;
     double height;
@@ -349,6 +351,7 @@ void setWindowCollectionBehavior(CFTypeRef windowRef, int canJoinAllSpaces, int 
 void setWindowFrameForAnchors(CFTypeRef windowRef, CGFloat width, CGFloat height, int anchor, int marginTop, int marginBottom, int marginLeft, int marginRight);
 void configureLayerShellWindow(CFTypeRef windowRef, int layer, int anchor, int keyboardInteractivity, int canJoinAllSpaces);
 NSRect getScreenFrame(CFTypeRef windowRef);
+void updateActivationPolicyForLayerShell(void);
 
 */
 import "C"
@@ -1167,6 +1170,9 @@ func newWindow(win *callbacks, options []Option) {
 				C.int(cnf.LayerShell.KeyboardInteractivity),
 				C.int(cnf.LayerShell.Margin.Top), C.int(cnf.LayerShell.Margin.Bottom),
 				C.int(cnf.LayerShell.Margin.Left), C.int(cnf.LayerShell.Margin.Right))
+
+			// Update activation policy to prevent dock icon and app switcher appearance
+			C.updateActivationPolicyForLayerShell()
 		} else {
 			// Create regular window
 			window = C.gio_createWindow(w.view, C.CGFloat(cnf.Size.X), C.CGFloat(cnf.Size.Y), 0, 0, 0, 0)

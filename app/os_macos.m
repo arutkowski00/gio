@@ -14,7 +14,7 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 @interface GioWindowDelegate : NSObject<NSWindowDelegate>
 @end
 
-@interface GioLayerShellWindow : NSWindow
+@interface GioLayerShellWindow : NSPanel
 @property int keyboardInteractivity;
 @end
 
@@ -52,15 +52,15 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 }
 - (void)windowDidBecomeKey:(NSNotification *)notification {
 	NSWindow *window = (NSWindow *)[notification object];
-	GioView *view = (GioView *)window.contentView;
-	if ([window firstResponder] == view) {
+	GioView *view = (GioView *)[window contentView];
+	if (view) {
 		gio_onFocus(view.handle, 1);
 	}
 }
 - (void)windowDidResignKey:(NSNotification *)notification {
 	NSWindow *window = (NSWindow *)[notification object];
-	GioView *view = (GioView *)window.contentView;
-	if ([window firstResponder] == view) {
+	GioView *view = (GioView *)[window contentView];
+	if (view) {
 		gio_onFocus(view.handle, 0);
 	}
 }
@@ -68,17 +68,13 @@ __attribute__ ((visibility ("hidden"))) CALayer *gio_layerFactory(BOOL presentWi
 
 @implementation GioLayerShellWindow
 - (BOOL)canBecomeKeyWindow {
-	// KeyboardInteractivityNone = 0, KeyboardInteractivityExclusive = 1, KeyboardInteractivityOnDemand = 2
-	return self.keyboardInteractivity != 0;
+	// Layer shell windows should never become key windows to prevent focus
+	return NO;
 }
 
 - (BOOL)canBecomeMainWindow {
-	// Only allow becoming main window for on-demand interactivity
-	return self.keyboardInteractivity == 2;
-}
-
-- (BOOL)acceptsFirstResponder {
-	return self.keyboardInteractivity != 0;
+	// Layer shell windows should never become main windows
+	return NO;
 }
 @end
 
@@ -426,25 +422,33 @@ CFTypeRef gio_createLayerShellWindow(CFTypeRef viewRef, CGFloat width, CGFloat h
 	@autoreleasepool {
 		NSRect rect = NSMakeRect(0, 0, width, height);
 		
-		GioLayerShellWindow* window = [[GioLayerShellWindow alloc] initWithContentRect:rect
-																			 styleMask:NSWindowStyleMaskBorderless
-																			   backing:NSBackingStoreBuffered
-																				 defer:NO];
-		window.keyboardInteractivity = keyboardInteractivity;
+		// Create as NSPanel (not NSWindow) for better focus behavior
+		GioLayerShellWindow* panel = [[GioLayerShellWindow alloc] initWithContentRect:rect
+																			styleMask:NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskBorderless
+																			  backing:NSBackingStoreBuffered
+																				defer:NO];
 		
-		[window setAcceptsMouseMovedEvents:YES];
+		panel.keyboardInteractivity = keyboardInteractivity;
+		
+		// Basic panel configuration
+		[panel setAcceptsMouseMovedEvents:YES];
+		
+		// Ensure panel never becomes key or main
+		[panel setLevel:NSFloatingWindowLevel]; // Will be overridden by layer config
+		[panel setHidesOnDeactivate:NO];
+		
 		NSView *view = (__bridge NSView *)viewRef;
-		[window setContentView:view];
-		window.delegate = globalWindowDel;
+		[panel setContentView:view];
+		panel.delegate = globalWindowDel;
 		
 		// Configure layer shell properties
-		configureLayerShellWindow((__bridge CFTypeRef)window, layer, anchor, keyboardInteractivity, YES);
+		configureLayerShellWindow((__bridge CFTypeRef)panel, layer, anchor, keyboardInteractivity, YES);
 		
 		// Set initial position based on anchors
-		setWindowFrameForAnchors((__bridge CFTypeRef)window, width, height, anchor, 
+		setWindowFrameForAnchors((__bridge CFTypeRef)panel, width, height, anchor, 
 								 marginTop, marginBottom, marginLeft, marginRight);
 		
-		return (__bridge_retained CFTypeRef)window;
+		return (__bridge_retained CFTypeRef)panel;
 	}
 }
 
@@ -477,8 +481,22 @@ void gio_viewSetHandle(CFTypeRef viewRef, uintptr_t handle) {
 
 @implementation GioAppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
-	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-	[NSApp activateIgnoringOtherApps:YES];
+	// Check if we should use accessory mode (for layer shell/status bar apps)
+	// This prevents the app from showing in the dock and app switcher
+	BOOL hasLayerShellWindows = NO;
+	for (NSWindow *window in [NSApp windows]) {
+		if ([window isKindOfClass:[GioLayerShellWindow class]]) {
+			hasLayerShellWindows = YES;
+			break;
+		}
+	}
+	
+	if (hasLayerShellWindows) {
+		[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+	} else {
+		[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		[NSApp activateIgnoringOtherApps:YES];
+	}
 	gio_onFinishLaunching();
 }
 @end
@@ -549,8 +567,8 @@ void setWindowCollectionBehavior(CFTypeRef windowRef, int canJoinAllSpaces, int 
 			behavior |= NSWindowCollectionBehaviorStationary;
 		}
 		
-		// For layer shell windows, we typically want them to be transient
-		// and not participate in normal window cycling
+		// For layer shell windows, we want them to be completely invisible 
+		// to the user's normal window management
 		behavior |= NSWindowCollectionBehaviorTransient;
 		behavior |= NSWindowCollectionBehaviorIgnoresCycle;
 		
@@ -698,5 +716,24 @@ void configureLayerShellWindow(CFTypeRef windowRef, int layer, int anchor,
 		[window setHasShadow:NO];
 		[window setOpaque:NO];
 		[window setBackgroundColor:[NSColor clearColor]];
+	}
+}
+
+void updateActivationPolicyForLayerShell(void) {
+	@autoreleasepool {
+		// Check if we have any layer shell windows
+		BOOL hasLayerShellWindows = NO;
+		for (NSWindow *window in [NSApp windows]) {
+			if ([window isKindOfClass:[GioLayerShellWindow class]]) {
+				hasLayerShellWindows = YES;
+				break;
+			}
+		}
+		
+		if (hasLayerShellWindows) {
+			[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+		} else {
+			[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		}
 	}
 }
